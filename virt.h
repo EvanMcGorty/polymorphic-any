@@ -33,17 +33,19 @@
 //note: a variadic list wrapper and a concept for that would be nice for users to be able to use
 //maybe one day the memory buffer could be used to store more than one object (maybe of different sizes)
 
+//my assert for logic errors when error checking is on
 template<std::predicate t>
 void my_assert(t tar,std::string message = "[no error message provided]")
 {
 	assert(tar());
 }
 
+//assert that the dynamic cast doesnt result in a nullptr if rtti is on
 template<typename to_t, typename from_t, typename error_string_t = char const* >
 	requires std::is_pointer_v<to_t>
-void assert_valid_dynamic_cast(from_t* a, error_string_t&& error = "static_cast fail")
+void assert_valid_dynamic_cast(from_t* a, to_t compare, error_string_t&& error = "static_cast fail")
 {
-	my_assert([&]{return dynamic_cast<to_t>(a)!=nullptr;}, std::forward<error_string_t>(error));
+	my_assert([&]{return dynamic_cast<to_t>(a)==compare;}, std::forward<error_string_t>(error));
 }
 
 class any;
@@ -61,56 +63,62 @@ constexpr bool is_any_or_derived_wrapper_v<derived_wrapper<t>> = true;
 template<>
 constexpr bool is_any_or_derived_wrapper_v<any> = true;
 
+//asserts that the cast is valid with dynamic cast
+template<typename to_t, typename from_t, typename error_string_t = char const*>
+	requires (std::is_pointer_v<to_t> && !std::is_same_v<to_t, any*> && !std::is_same_v<from_t, any>)
+to_t smart_static_cast(from_t* a, error_string_t&& error = "static_cast fail")
+{
+	to_t result = static_cast<to_t>(a);
+	assert_valid_dynamic_cast<to_t>(a, result, std::forward<error_string_t>(error));
+	return result;
+}
 
+//overload to cast between t and any by (illegally) crossing through a derived_wrapper<t> even though t may not actually be a derived_wrapper<t> (but rather a derived_wrapper of another class in the same heierarchy) 
+template<typename to_t, typename error_string_t = char const*>
+	requires (std::is_pointer_v<to_t> && !is_any_or_derived_wrapper_v<std::remove_pointer_t<to_t>>)
+to_t smart_static_cast(any* from, error_string_t&& error = "bad static cast from any*")
+{
+	to_t result = static_cast<to_t>(static_cast<derived_wrapper<std::remove_pointer_t<to_t>>*>(from));
+	assert_valid_dynamic_cast<to_t>(from, result, std::forward<error_string_t>(error));
+	return result;
+}
+
+//same as previous overload but other direction
+template<std::same_as<any*> to_t, typename from_t, typename error_string_t = char const*>
+	requires (!is_any_or_derived_wrapper_v<from_t>)
+any* smart_static_cast(from_t* from, error_string_t&& error = "bad static cast to any*")
+{
+	//static_assert(false);
+	any* result = static_cast<any*>(static_cast<derived_wrapper<from_t>*>(from));
+	//technically unsafe because there is no guarantee that from_t actually is also a derived_wrapper<from_t>,
+	//but theoretically this should always work
+	assert_valid_dynamic_cast<any*>(from, result, std::forward<error_string_t>(error));
+	return result;
+}
+
+//just to cover this case when it gets called without creating a derived_wrapper<any>
 template<std::same_as<any*> to_t, typename error_string_t = char const*>
 any* smart_static_cast(any* from, error_string_t&& error = "this error should never be seen")
 {
 	return from;
 }
 
-template<typename to_t, typename error_string_t = char const*>
-	requires (std::is_pointer_v<to_t> && !is_any_or_derived_wrapper_v<std::remove_pointer_t<to_t>>)
-to_t smart_static_cast(any* from, error_string_t&& error = "bad static cast from any*")
-{
-	to_t result = static_cast<to_t>(static_cast<derived_wrapper<std::remove_pointer_t<to_t>>*>(from));
-	assert_valid_dynamic_cast<to_t>(from, std::forward<error_string_t>(error));
-	return result;
-}
 
-template<std::same_as<any*> to_t, typename from_t, typename error_string_t = char const*>
-	requires (!is_any_or_derived_wrapper_v<from_t>)
-any* smart_static_cast(from_t* from, error_string_t&& error = "bad static cast to any*")
-{
-	any* result = static_cast<any*>(static_cast<derived_wrapper<from_t>*>(from));
-	//technically unsafe because there is no guarantee that from_t actually is also a derived_wrapper<from_t>,
-	//but theoretically this should always work
-	assert_valid_dynamic_cast<any*>(from, std::forward<error_string_t>(error));
-	return result;
-}
-
-template<typename to_t, typename from_t, typename error_string_t = char const*>
-	requires (std::is_pointer_v<to_t> && !std::is_same_v<to_t,any*> && !std::is_same_v<from_t,any>)
-to_t smart_static_cast(from_t* a, error_string_t&& error = "static_cast fail")
-{
-	assert_valid_dynamic_cast<to_t>(a, std::forward<error_string_t>(error));
-	return static_cast<to_t>(a);
-}
-
-
-//static cast for unique_ptr
+//static cast for smart pointers
 template<typename to_t, typename from_t, typename error_string_t = char const* >
 std::unique_ptr<to_t> sptr_static_cast(std::unique_ptr<from_t>&& a, error_string_t&& error = "sptr_static_cast fail")
 {
 	from_t* rawptr = a.release();
-	assert_valid_dynamic_cast<to_t*>(rawptr, std::forward<error_string_t>(error));
-	return std::unique_ptr<to_t>(smart_static_cast<to_t*>(rawptr));
+	to_t* result = smart_static_cast<to_t*>(rawptr);
+	assert_valid_dynamic_cast<to_t*>(rawptr, result, std::forward<error_string_t>(error));
+	return std::unique_ptr<to_t>(result);
 }
 
-
+//a universal base class
 class any
 {
 public:
-	virtual ~any(){}
+	virtual ~any() {}
 
 private:
 
@@ -160,11 +168,13 @@ friend class virt;
 
 };
 
-
+//a wrapper of t that inherits from t and any to provide any with virtual methods to perform operations on t
 template<typename t>
 class derived_wrapper final : public t, public any //declared final so that sizeof can be determined for the whole object
 {
 public:
+
+	~derived_wrapper() override = default;
 
 	/*derived_wrapper(t&& a) : t(std::move(a)) {}
 	derived_wrapper(t const& a) : t(a) {}*/
@@ -176,7 +186,8 @@ public:
 	{
 		if constexpr (std::is_copy_constructible_v<t>)
 		{
-			return { std::make_unique<derived_wrapper>(*smart_static_cast<t const*>(this)) };
+			t const& tocopy = *this;
+			return { std::make_unique<derived_wrapper>(tocopy) };
 		}
 		else
 		{
@@ -188,7 +199,8 @@ public:
 	{
 		if constexpr (std::is_move_constructible_v<t>)
 		{
-			return { std::make_unique<derived_wrapper>(std::move(*smart_static_cast<t*>(this))) };
+			t& tomove = *this;
+			return { std::make_unique<derived_wrapper>(std::move(tomove)) };
 		}
 		else
 		{
@@ -199,10 +211,12 @@ public:
 };
 
 
-
+//even though t doesnt actually derive from any, virt acts like it does for virt<any> and virt<t>, so this is necessary
 template<typename derived_t, typename base_t>
 concept special_derived_from = std::derived_from<derived_t,base_t> || std::same_as<base_t,any>;
 
+
+//a smart pointer wrapper that only holds a t* that is also some derived_wrapper and therefore can be converted to any*
 template<typename t>
 class virt_data
 {
@@ -223,13 +237,13 @@ public:
 
 	virt_data(std::unique_ptr<derived_wrapper<t>>&& a)
 	{
-		give_unique_ptr(sptr_static_cast<any>(std::move(a)));
+		give_unique_ptr(std::unique_ptr<any>(std::move(a)));
 	}
 
 	virt_data(virt_data&& a) = default;
-	virt_data(virt_data const& a) = delete;
+	virt_data(virt_data const& a) = default;
 	virt_data& operator=(virt_data&& a) = default;
-	virt_data& operator=(virt_data const& a) = delete;
+	virt_data& operator=(virt_data const& a) = default;
 
 
 	virt_data& operator=(std::unique_ptr<t>&& a)
@@ -248,14 +262,14 @@ public:
 		return std::move(ptr);
 	}
 
-	void give_unique_ptr(std::unique_ptr<t>&& a)
-		requires !std::same_as<t,any>
-	{
-		my_assert([&] {return bool{ a }; }, "virt_data should not be given a nullptr");
-		assert_valid_dynamic_cast<any*>(&*a, "virt_data must be given a pointer to type derived_wrapper<t>");
-		//cast to any has an assert in it
-		ptr = std::move(a);
-	}
+	//void give_unique_ptr(std::unique_ptr<t>&& a)
+	//	requires (!std::same_as<t,any>)
+	//{
+	//	my_assert([&] {return bool{ a }; }, "virt_data should not be given a nullptr");
+	//	assert_valid_dynamic_cast<any*>(&*a, "virt_data must be given a pointer to type derived_wrapper<t>");
+	//	//cast to any has an assert in it
+	//	ptr = std::move(a);
+	//}
 
 	void give_unique_ptr(std::unique_ptr<any>&& a)
 	{
@@ -267,16 +281,16 @@ public:
 	bool can_downcast()
 	{
 		my_assert([&] {return bool{ ptr }; }, "cannot check can_downcast for a nullptr");
-		return assert_valid_dynamic_cast<tar_t*>(&*ptr) != nullptr;
+		return dynamic_cast<tar_t*>(&*ptr) != nullptr;
 	}
 
 	template<special_derived_from<t> tar_t>
 	virt_data<tar_t> downcast() &&
 	{
 		my_assert([&] {return bool{ ptr }; }, "cannot downcast a nullptr");
-		assert_valid_dynamic_cast<tar_t*>(&*ptr, "downcast failed");
-		
-		return virt_data<tar_t>{sptr_dynamic_cast<tar_t>(std::move(ptr))};
+		virt_data<tar_t> result = sptr_dynamic_cast<tar_t>(std::move(ptr));
+		assert_valid_dynamic_cast<tar_t*>(&*ptr, &*result, "downcast failed");
+		return virt_data<tar_t>{result};
 	}
 
 	template<typename tar_t>
@@ -289,12 +303,11 @@ public:
 
 };
 
-
+//if t is not polymorphic, static_cast cannot be used to convert it to any*, so this provides a wrapper type
 template<typename t>
 struct underlying_type_wrapper
 {
 	struct type
-	//	: public t
 	{
 	public:
 		virtual void filler() {}
@@ -304,7 +317,6 @@ struct underlying_type_wrapper
 		template<typename...args>
 		type(args&&...vals) :
 		val
-		//t
 		{std::forward<args>(vals)...} {}
 
 
@@ -314,13 +326,8 @@ struct underlying_type_wrapper
 	};
 };
 
-//template<typename t>
-//	requires std::is_fundamental_v<t>
-//struct underlying_type_wrapper<t>
-//{
-//	using type = t;
-//};
 
+//if t is already polymorphic then naturally it can be used
 template<typename t>
 	requires std::is_polymorphic_v<t>
 struct underlying_type_wrapper<t>
@@ -328,8 +335,8 @@ struct underlying_type_wrapper<t>
 	using type = t;
 };
 
-//nullptr state can be achieved by default initialization, or by move constructing from ::data().
-//This is an invalid state for any operation other than dereferencing
+
+//a smart pointer class that allows copy and move semantics like std::any does
 template<typename raw_t>
 class virt
 {
@@ -337,7 +344,6 @@ private:
 
 	using stored_t = typename underlying_type_wrapper<raw_t>::type; //if raw_t is polymorphic, stored_t is the same, otherwise, stored_t is wrapper of raw_t that makes it polymorphic
 
-	virt(virt_data<stored_t>&& a) : data(std::move(a)) {}
 
 public:
 
@@ -349,13 +355,15 @@ public:
 
 	explicit virt() : data{} {} //data{} initializes to nullptr
 
+
+	virt(virt_data<stored_t>&& a) : data(std::move(a)) {}
+
 	//template<special_derived_from<raw_t> rhs_t>
 	//virt(virt_data<rhs_t>&& a)
 	//{
 	//	my_assert([&] {return bool{ a.ptr }; }, "virt may not be assigned an empty (nullptr) virt_data");
 	//	data = std::move(a);
 	//}
-
 
 	////template<special_derived_from<raw_t> rhs_t>
 	//template<typename rhs_t>
@@ -455,7 +463,8 @@ private:
 	{
 		if constexpr(std::is_polymorphic_v<raw_t>)
 		{
-			return smart_static_cast<raw_t*>(&*data.ptr);
+			raw_t* ret = &*data.ptr;
+			return ret;
 		}
 		else
 		{
@@ -477,20 +486,24 @@ public:
 
 	raw_t const& operator*() const
 	{
+		my_assert([&] {return bool{ data.ptr }; }, "cannot access empty virt");
 		return *get_ptr();
 	}
 
 	raw_t& operator*()
 	{
+		my_assert([&] {return bool{ data.ptr }; }, "cannot access empty virt");
 		return *get_ptr();
 	}
 
 	raw_t const* operator->() const
 	{
+		my_assert([&] {return bool{ data.ptr }; }, "cannot access empty virt");
 		return get_ptr();
 	}
 	raw_t* operator->()
 	{
+		my_assert([&] {return bool{ data.ptr }; }, "cannot access empty virt");
 		return get_ptr();
 	}
 	
@@ -511,7 +524,8 @@ public:
 	tar_t* upcast()
 	{
 		my_assert([&] {return bool{ data.ptr }; }, "cannot upcast a nullptr");
-		return smart_static_cast<tar_t*>(&*data.ptr);
+		tar_t* ret = &*data.ptr;
+		return ret;
 	}
 
 	//needs rtti
