@@ -38,17 +38,21 @@
 
 //my assert for logic errors when error checking is on
 template<std::predicate t>
-void my_assert(t tar,std::string message = "[no error message provided]")
+constexpr void my_assert(t tar,std::string message = "[no error message provided]")
 {
+#ifndef NDEBUG
 	assert(tar());
+#endif
 }
 
 //assert that the dynamic cast doesnt result in a nullptr if rtti is on
 template<typename to_t, typename from_t, typename error_string_t = char const* >
 	requires std::is_pointer_v<to_t>
-void assert_valid_dynamic_cast(from_t* a, to_t compare, error_string_t&& error = "static_cast fail")
+constexpr void assert_valid_dynamic_cast(from_t* a, to_t compare, error_string_t&& error = "static_cast fail")
 {
+#ifndef NDEBUG
 	my_assert([&]{return dynamic_cast<to_t>(a)==compare;}, std::forward<error_string_t>(error));
+#endif
 }
 
 template<typename lhs, typename rhs, typename extra_rhs = rhs>
@@ -64,6 +68,19 @@ size_t ptr_distance()
 
 	return static_cast<size_t>(li - ri);
 }
+
+class safe_void_ptr_base
+{
+#ifndef NDEBUG
+	virtual void foo(){} //just to give this class rtti for debug checks
+#endif
+};
+
+template<typename t>
+struct safe_void_ptr_derived : public safe_void_ptr_base
+{
+	t* wrapped_ptr;
+};
 
 
 //a universal base class
@@ -87,11 +104,17 @@ public:
 	virtual std::unique_ptr<any> copy_construct() = 0;
 	virtual std::unique_ptr<any> move_construct() = 0;
 
+
+	//virtual void placement_copy_construct(safe_void_ptr_base*) = 0;
+	//virtual void placement_move_construct(safe_void_ptr_base*) = 0;
+	//non constexpr
+
+
 	virtual bool try_copy_assign(any*) = 0;
 	virtual bool try_move_assign(any*) = 0;
 
-	virtual bool do_copy_assign(void const*) = 0;
-	virtual bool do_move_assign(void*) = 0;
+	virtual bool do_copy_assign(safe_void_ptr_base*) = 0;
+	virtual bool do_move_assign(safe_void_ptr_base*) = 0;
 
 	//make reference/pointer
 	//make const reference/pointer
@@ -229,12 +252,12 @@ public:
 		}
 	}
 
-	bool do_copy_assign(void const* tar) override
+	bool do_copy_assign(safe_void_ptr_base* tar) override
 	{
 		if constexpr (std::is_copy_assignable_v<t>)
 		{
 			t* lhs = this;
-			*lhs = *std::launder(reinterpret_cast<t const*>(tar));
+			*lhs = *(smart_static_cast<safe_void_ptr_derived<t const>*>(tar)->wrapped_ptr);
 			return true;
 		}
 		else
@@ -243,12 +266,12 @@ public:
 		}
 	}
 
-	bool do_move_assign(void* tar) override
+	bool do_move_assign(safe_void_ptr_base* tar) override
 	{
 		if constexpr (std::is_move_assignable_v<t>)
 		{
 			t* lhs = this;
-			*lhs = std::move(*std::launder(reinterpret_cast<t*>(tar)));
+			*lhs = std::move(*(smart_static_cast<safe_void_ptr_derived<t>*>(tar)->wrapped_ptr));
 			return true;
 		}
 		else
@@ -274,7 +297,7 @@ constexpr bool is_any_or_derived_wrapper_v<any> = true;
 //asserts that the cast is valid with dynamic cast
 template<typename to_t, typename from_t, typename error_string_t = char const*>
 	requires (std::is_pointer_v<to_t> && !std::is_same_v<to_t, any*> && !std::is_same_v<from_t, any>)
-to_t smart_static_cast(from_t* a, error_string_t&& error = "static_cast fail")
+constexpr to_t smart_static_cast(from_t* a, error_string_t&& error = "static_cast fail")
 {
 	to_t result = static_cast<to_t>(a);
 	assert_valid_dynamic_cast<to_t>(a, result, std::forward<error_string_t>(error));
@@ -302,9 +325,7 @@ to_t smart_static_cast(any* from, error_string_t&& error = "bad static cast from
 template<std::same_as<any*> to_t, typename from_t, typename error_string_t = char const*>
 any* smart_static_cast(derived_wrapper<from_t>* from, error_string_t&& error = "bad static cast to any*")
 {
-	any* result = static_cast<any*>(static_cast<derived_wrapper<from_t>*>(from));
-	//technically unsafe because there is no guarantee that from_t actually is also a derived_wrapper<from_t>,
-	//but theoretically this should always work
+	any* result = static_cast<any*>(from);
 	assert_valid_dynamic_cast<any*>(from, result, std::forward<error_string_t>(error));
 	return result;
 }
@@ -373,6 +394,8 @@ struct underlying_type_wrapper<t>
 
 
 
+template<typename o_t>
+class virt;
 
 //a smart pointer wrapper that only holds a t* that is also some derived_wrapper and therefore can be converted to any*
 template<typename raw_t>
@@ -423,59 +446,37 @@ public:
 	virt_data& operator=(virt_data&& a) { ptr = std::move(a.ptr); return *this; }
 	virt_data& operator=(virt_data const& a) { ptr = a.ptr; return *this; }
 
-	template<special_derived_from<raw_t> tar_t>
+	template<special_derived_from<stored_t> tar_t>
 	virt_data(virt_data<tar_t>&& a) : ptr(std::move(a.ptr)) {}
-	template<special_derived_from<raw_t> tar_t>
+	template<special_derived_from<stored_t> tar_t>
 	virt_data(virt_data<tar_t> const& a) : ptr(a.ptr) {}
-	template<special_derived_from<raw_t> tar_t>
+	template<special_derived_from<stored_t> tar_t>
 	virt_data& operator=(virt_data<tar_t> && a) { ptr = std::move(a.ptr); return *this; }
-	template<special_derived_from<raw_t> tar_t>
+	template<special_derived_from<stored_t> tar_t>
 	virt_data& operator=(virt_data<tar_t> const& a) { ptr = a.ptr; return *this; }
 
 
-	template<special_derived_from<raw_t> tar_t>
+	template<special_derived_from<stored_t> tar_t>
 	virt_data(virt<tar_t>&& a) : ptr(std::move(get_data_from_virt(a))) {}
-	template<special_derived_from<raw_t> tar_t>
+	template<special_derived_from<stored_t> tar_t>
 	virt_data(virt<tar_t> const& a) : ptr(get_data_from_virt(a)) {}
-	template<special_derived_from<raw_t> tar_t>
+	template<special_derived_from<stored_t> tar_t>
 	virt_data& operator=(virt<tar_t>&& a) { ptr = std::move(get_data_from_virt(a).ptr); return *this; }
-	template<special_derived_from<raw_t> tar_t>
+	template<special_derived_from<stored_t> tar_t>
 	virt_data& operator=(virt<tar_t> const& a) { ptr = get_data_from_virt(a).ptr; return *this; }
 
-
-	//virt_data& operator=(std::unique_ptr<raw_t>&& a)
-	//{
-	//	give_unique_ptr(std::move(a));
-	//	return *this;
-	//}
 	virt_data& operator=(std::unique_ptr<derived_wrapper<stored_t>>&& a)
 	{
 		give_unique_ptr(std::move(a));
 		return *this;
 	}
 
-	std::unique_ptr<raw_t> get_unique_ptr() &&
+	std::unique_ptr<stored_t> get_unique_ptr() &&
 	{
-		return sptr_static_cast<raw_t>(std::move(ptr));
+		return sptr_static_cast<stored_t>(std::move(ptr));
 	}
 
-	//void give_unique_ptr(std::unique_ptr<raw_t>&& a)
-	//	requires (!std::same_as<raw_t,any>)
-	//{
-	//	my_assert([&] {return bool{ a }; }, "virt_data should not be given a nullptr");
-	//	assert_valid_dynamic_cast<any*>(&*a, "virt_data must be given a pointer to type derived_wrapper<t>");
-	//	//cast to any has an assert in it
-	//	ptr = std::move(a);
-	//}
-
-	template<special_derived_from<raw_t> tar_t>
-	bool can_downcast()
-	{
-		my_assert([&] {return bool{ ptr }; }, "cannot check can_downcast for a nullptr");
-		return dynamic_cast<tar_t*>(&*ptr) != nullptr;
-	}
-
-	template<special_derived_from<raw_t> tar_t>
+	template<special_derived_from<stored_t> tar_t>
 	virt_data<tar_t> downcast() &&
 	{
 		my_assert([&] {return bool{ ptr }; }, "cannot downcast a nullptr");
@@ -485,7 +486,7 @@ public:
 	}
 
 	template<typename tar_t>
-		requires special_derived_from<raw_t,tar_t>
+		requires special_derived_from<stored_t,tar_t>
 	virt_data<tar_t> upcast() &&
 	{
 		my_assert([&] {return bool{ ptr }; }, "cannot upcast a nullptr");
@@ -521,13 +522,6 @@ public:
 
 	template<special_derived_from<stored_t> from_t>
 	virt(virt_data<from_t> const& a) : data(a.ptr) {}
-	
-	template<typename to_t>
-		requires special_derived_from<stored_t, to_t>
-	operator virt_data<to_t>()&&
-	{
-		return { std::move(data.ptr) };
-	}
 
 	template<special_derived_from<stored_t> rhs_t>
 		requires (!is_virt_v<std::decay_t<rhs_t>>)
@@ -542,7 +536,7 @@ public:
 
 	virt(raw_t const& a) : data{ std::make_unique<derived_wrapper<stored_t>>(a) } {}
 
-	template<special_derived_from<raw_t> rhs_t>
+	template<special_derived_from<stored_t> rhs_t>
 	virt(virt<rhs_t>&& a)
 	{
 		if (a)
@@ -570,7 +564,7 @@ public:
 	}
 
 
-	template<special_derived_from<raw_t> rhs_t>
+	template<special_derived_from<stored_t> rhs_t>
 	virt(virt<rhs_t> const& a)
 	{
 		if (a)
@@ -618,7 +612,7 @@ public:
 	{
 		if(get_type() == typeof(a))
 		{
-			data.ptr->do_move_assign(reinterpret_cast<void*>(&a));
+			data.ptr->do_move_assign(safe_void_ptr_derived<rhs_t>{&a});
 		}
 		else
 		{
@@ -633,7 +627,7 @@ public:
 	{
 		if (get_type() == typeof(a))
 		{
-			data.ptr->do_copy_assign(reinterpret_cast<void const*>(&a));
+			data.ptr->do_copy_assign(safe_void_ptr_derived<rhs_t const>{&a});
 		}
 		else
 		{
@@ -754,7 +748,7 @@ public:
 
 	//no rtti, always works
 	template<typename tar_t>
-		requires special_derived_from<raw_t, tar_t>
+		requires special_derived_from<stored_t, tar_t>
 	tar_t* upcast()
 	{
 		using r_tar_t = typename underlying_type_wrapper<tar_t>::type;
