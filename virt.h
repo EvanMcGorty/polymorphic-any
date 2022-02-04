@@ -37,16 +37,16 @@
 //maybe one day the memory buffer could be used to store more than one object (maybe of different sizes)
 
 //my assert for logic errors when error checking is on
-template<std::predicate t>
-constexpr void my_assert(t tar,std::string message = "[no error message provided]")
+template<std::predicate t, typename error_string_t = char const*>
+constexpr void my_assert(t tar,error_string_t message = "[no error message provided]")
 {
 #ifndef NDEBUG
-	assert(tar());
+	if(!tar()){throw std::logic_error(std::move(message));}
 #endif
 }
 
 //assert that the dynamic cast doesnt result in a nullptr if rtti is on
-template<typename to_t, typename from_t, typename error_string_t = char const* >
+template<typename to_t, typename from_t, typename error_string_t = char const*>
 	requires std::is_pointer_v<to_t>
 constexpr void assert_valid_dynamic_cast(from_t* a, to_t compare, error_string_t&& error = "static_cast fail")
 {
@@ -83,22 +83,40 @@ struct safe_void_ptr_derived : public safe_void_ptr_base
 };
 
 
+template<typename t>
+constexpr bool is_any_or_derived_wrapper_v = false; //will be specialized later
+
+class any;
+
+template<typename to_t, typename error_string_t = char const*>
+	requires (std::is_pointer_v<to_t> && !is_any_or_derived_wrapper_v<std::remove_pointer_t<to_t>>)
+to_t smart_static_cast(any*, error_string_t&& = "bad static cast from any*");
+
 //a universal base class
 class any
 {
 public:
 	virtual ~any() {}
 
-//private:
-//
-//template<typename t>
-//friend class derived_wrapper;
-//template<typename t>
-//friend class virt;
+private:
+
+template<typename t>
+friend class derived_wrapper;
+template<typename t>
+	requires (!is_virt_v<t>)
+friend class virt;
+
+template<typename to_t, typename error_string_t>
+	requires (std::is_pointer_v<to_t> && !is_any_or_derived_wrapper_v<std::remove_pointer_t<to_t>>)
+friend to_t smart_static_cast(any*, error_string_t&&);
 
 	virtual size_t ptr_distance_from_any() = 0;
 
 	virtual type get_typeof() = 0;
+
+	virtual bool is_const() = 0;
+
+	//virtual bool is_reference() = 0;
 
 	//generic operations without consistent return types
 	virtual std::unique_ptr<any> copy_construct() = 0;
@@ -154,10 +172,13 @@ public:
 
 };
 
+template<typename t>
+class derived_wrapper;
 
 //a wrapper of t that inherits from t and any to provide any with virtual methods to perform operations on t
 template<typename t>
-class derived_wrapper final : public t, public any //declared final so that sizeof can be determined for the whole object
+	requires std::is_const_v<t>
+class derived_wrapper<t> : public std::remove_const_t<t>, public any //declared final so that sizeof can be determined for the whole object
 {
 public:
 
@@ -170,23 +191,25 @@ public:
 
 	type get_typeof() override
 	{
-		return typeof<t>();
+		return typeof<std::remove_const_t<t>>();
+	}
+
+	bool is_const() override
+	{
+		return true;
 	}
 
 	~derived_wrapper() override = default;
-
-	/*derived_wrapper(t&& a) : t(std::move(a)) {}
-	derived_wrapper(t const& a) : t(a) {}*/
 
 	template<typename...args>
 	derived_wrapper(args&&...vals) : t{ std::forward<args>(vals)... } {}
 
 	std::unique_ptr<any> copy_construct() override
 	{
-		if constexpr (std::is_copy_constructible_v<t>)
+		if constexpr (std::is_copy_constructible_v<std::remove_const_t<t>>)
 		{
 			t const& tocopy = *this;
-			return { std::make_unique<derived_wrapper>(tocopy) };
+			return { std::make_unique<derived_wrapper<std::remove_const_t<t>>>(tocopy) };
 		}
 		else
 		{
@@ -196,10 +219,76 @@ public:
 
 	std::unique_ptr<any> move_construct() override
 	{
+		if constexpr (std::is_move_constructible_v<t>) //ie constructible from const rvalue
+		{
+			t const& tocopy = *this;
+			return { std::make_unique<derived_wrapper<std::remove_const_t<t>>>(std::move(tocopy)) };
+		}
+		else
+		{
+			return {nullptr};
+		}
+	}
+
+
+	bool try_copy_assign(any* tar) override
+	{
+		my_assert([]{return false;});//library error
+		return false;
+	}
+
+	bool try_move_assign(any* tar) override
+	{
+		my_assert([]{return false;});//library error
+		return false;
+	}
+
+	bool do_copy_assign(safe_void_ptr_base* tar) override
+	{
+		my_assert([]{return false;});//library error
+		return false;
+	}
+
+	bool do_move_assign(safe_void_ptr_base* tar) override
+	{
+		my_assert([]{return false;});//library error
+		return false;
+	}
+
+};
+
+template<typename t>
+class derived_wrapper : public derived_wrapper<const t>
+{
+public:
+	size_t ptr_distance_from_any() override
+	{
+		static size_t ret = ptr_distance<any*, derived_wrapper<t>*, t*>();
+		return ret;
+	}
+
+	type get_typeof() override
+	{
+		return typeof<t>();
+	}
+
+	bool is_const() override
+	{
+		return false;
+	}
+
+	~derived_wrapper() override = default;
+
+	template<typename...args>
+	derived_wrapper(args&&...vals) : derived_wrapper<const t>{ std::forward<args>(vals)... } {}
+
+
+	std::unique_ptr<any> move_construct() override
+	{
 		if constexpr (std::is_move_constructible_v<t>)
 		{
 			t& tomove = *this;
-			return { std::make_unique<derived_wrapper>(std::move(tomove)) };
+			return { std::make_unique<derived_wrapper<t>>(std::move(tomove)) };
 		}
 		else
 		{
@@ -208,11 +297,12 @@ public:
 	}
 
 
+
 	bool try_copy_assign(any* tar) override
 	{
 		if constexpr (std::is_copy_assignable_v<t>)
 		{
-			if(get_typeof()==tar->get_typeof())
+			if (get_typeof() == tar->get_typeof())
 			{
 				t* rhs = smart_static_cast<t*>(tar);
 				t* lhs = this;
@@ -238,6 +328,7 @@ public:
 			{
 				t* rhs = smart_static_cast<t*>(tar);
 				t* lhs = this;
+				my_assert([&]{return !tar->is_const();});
 				*lhs = std::move(*rhs);
 				return true;
 			}
@@ -251,6 +342,7 @@ public:
 			return false;
 		}
 	}
+
 
 	bool do_copy_assign(safe_void_ptr_base* tar) override
 	{
@@ -279,13 +371,7 @@ public:
 			return false;
 		}
 	}
-
 };
-
-
-
-template<typename t>
-constexpr bool is_any_or_derived_wrapper_v = false;
 
 
 template<typename t>
@@ -305,17 +391,10 @@ constexpr to_t smart_static_cast(from_t* a, error_string_t&& error = "static_cas
 }
 
 //overload to cast from any* to t*
-template<typename to_t, typename error_string_t = char const*>
+template<typename to_t, typename error_string_t> //default error_string_t = char const*
 	requires (std::is_pointer_v<to_t> && !is_any_or_derived_wrapper_v<std::remove_pointer_t<to_t>>)
-to_t smart_static_cast(any* from, error_string_t&& error = "bad static cast from any*")
+to_t smart_static_cast(any* from, error_string_t&& error) //default error = "bad static cast from any*"
 {
-	//to_t result = static_cast<to_t>(static_cast<derived_wrapper<std::remove_pointer_t<to_t>>*>(from)); //doesnt work
-	//to_t realresult = dynamic_cast<to_t>(from);
-	//size_t d1 = from->ptr_distance_from_any(); // any-actual
-	//size_t d2 = ptr_distance<any*, derived_wrapper<std::remove_pointer_t<to_t>>*>(); //any-dummy
-	//auto s1 = static_cast<derived_wrapper<std::remove_pointer_t<to_t>>*>(from);
-	//auto s2 = static_cast<to_t>(s1);
-	//auto s3 = reinterpret_cast<std::byte*>(s2);
 	to_t result = std::launder(reinterpret_cast<to_t>(reinterpret_cast<std::byte*>(from) - from->ptr_distance_from_any()));
 	assert_valid_dynamic_cast<to_t>(from, result, std::forward<error_string_t>(error));
 	return result;
@@ -354,8 +433,16 @@ constexpr bool is_virt_v = false;
 
 //even though t doesnt actually derive from any, virt acts like it does for virt<any> and virt<t>, so this is necessary
 template<typename derived_t, typename base_t>
-concept special_derived_from = std::derived_from<derived_t,base_t> || 
-	(std::same_as<base_t,any>);// && !is_virt_v<std::decay_t<derived_t>>);
+concept special_derived_from = (
+	std::derived_from<derived_t,base_t> ||
+	std::same_as<base_t,any>
+	)
+		&& (
+		std::is_const_v<base_t> ||
+		!std::is_const_v<derived_t>
+		)
+	;
+	// && !is_virt_v<std::decay_t<derived_t>>);
 
 
 
@@ -366,19 +453,19 @@ struct underlying_type_wrapper
 {
 	struct type
 	{
-	public:
+	private:
 		virtual void filler() {}
 		//filler just to make this class polymorhic (so dynamic cast works with it)
 		//there might be a more standard way of doing this
-
+		t underlying_wrapped_val;
+	public:
 		template<typename...args>
 		type(args&&...vals) :
-			val
+			underlying_wrapped_val
 		{ std::forward<args>(vals)... } {}
 
-
-
-		t val; operator t& () { return val; }
+		operator t& () { return underlying_wrapped_val; }
+		operator t const& () const { return underlying_wrapped_val; }
 
 	};
 };
@@ -392,21 +479,36 @@ struct underlying_type_wrapper<t>
 	using type = t;
 };
 
+template<typename t>
+struct underlying_type_wrapper<const t>
+{
+	using type = typename underlying_type_wrapper<t>::type const;
+};
 
 
-template<typename o_t>
+
+template<typename raw_t>
+	requires (!is_virt_v<raw_t>)
 class virt;
+
 
 //a smart pointer wrapper that only holds a t* that is also some derived_wrapper and therefore can be converted to any*
 template<typename raw_t>
+	requires (!is_virt_v<raw_t>)
 class virt_data
 {
 private:
 
 	template<typename o_t>
+		requires (!is_virt_v<o_t>)
 	friend class virt_data;
 	template<typename o_t>
+		requires (!is_virt_v<o_t>)
 	friend class virt;
+
+	template<typename result_t, typename...ts>
+	friend virt<result_t> make_virt(ts&&...vals)
+		requires std::constructible_from<result_t, ts...>;
 
 	template<typename t>
 	friend virt_data<t>& get_data_from_virt(virt<t>& a);
@@ -433,37 +535,35 @@ public:
 
 	virt_data() : ptr{nullptr} {}
 
-
-	virt_data(std::unique_ptr<derived_wrapper<stored_t>>&& a)
-		requires (!std::same_as<stored_t,any>)
+	void reset()
 	{
-		give_unique_ptr(std::unique_ptr<any>(std::move(a)));
+		ptr = nullptr;
 	}
 
 
 	virt_data(virt_data&& a) : ptr(std::move(a.ptr)) {}
-	virt_data(virt_data const& a) : ptr(a.ptr) {}
+	//virt_data(virt_data const& a) : ptr(a.ptr) {}
 	virt_data& operator=(virt_data&& a) { ptr = std::move(a.ptr); return *this; }
-	virt_data& operator=(virt_data const& a) { ptr = a.ptr; return *this; }
+	//virt_data& operator=(virt_data const& a) { ptr = a.ptr; return *this; }
 
 	template<special_derived_from<stored_t> tar_t>
 	virt_data(virt_data<tar_t>&& a) : ptr(std::move(a.ptr)) {}
-	template<special_derived_from<stored_t> tar_t>
-	virt_data(virt_data<tar_t> const& a) : ptr(a.ptr) {}
+	//template<special_derived_from<stored_t> tar_t>
+	//virt_data(virt_data<tar_t> const& a) : ptr(a.ptr) {}
 	template<special_derived_from<stored_t> tar_t>
 	virt_data& operator=(virt_data<tar_t> && a) { ptr = std::move(a.ptr); return *this; }
-	template<special_derived_from<stored_t> tar_t>
-	virt_data& operator=(virt_data<tar_t> const& a) { ptr = a.ptr; return *this; }
+	//template<special_derived_from<stored_t> tar_t>
+	//virt_data& operator=(virt_data<tar_t> const& a) { ptr = a.ptr; return *this; }
 
 
 	template<special_derived_from<stored_t> tar_t>
 	virt_data(virt<tar_t>&& a) : ptr(std::move(get_data_from_virt(a))) {}
-	template<special_derived_from<stored_t> tar_t>
-	virt_data(virt<tar_t> const& a) : ptr(get_data_from_virt(a)) {}
+	//template<special_derived_from<stored_t> tar_t>
+	//virt_data(virt<tar_t> const& a) : ptr(get_data_from_virt(a)) {}
 	template<special_derived_from<stored_t> tar_t>
 	virt_data& operator=(virt<tar_t>&& a) { ptr = std::move(get_data_from_virt(a).ptr); return *this; }
-	template<special_derived_from<stored_t> tar_t>
-	virt_data& operator=(virt<tar_t> const& a) { ptr = get_data_from_virt(a).ptr; return *this; }
+	//template<special_derived_from<stored_t> tar_t>
+	//virt_data& operator=(virt<tar_t> const& a) { ptr = get_data_from_virt(a).ptr; return *this; }
 
 	virt_data& operator=(std::unique_ptr<derived_wrapper<stored_t>>&& a)
 	{
@@ -495,13 +595,20 @@ public:
 
 };
 
+
+template<typename result_t, typename...ts>
+virt<result_t> make_virt(ts&&...vals)
+	requires std::constructible_from<result_t, ts...>;
+
 //a smart pointer class that allows copy and move semantics like std::any does, particularly useful with virtual types
 template<typename raw_t>
+	requires (!is_virt_v<raw_t>)
 class virt
 {
 private:
 
-	template<typename t>
+	template<typename o_t>
+		requires (!is_virt_v<o_t>)
 	friend class virt;
 
 	using stored_t = typename underlying_type_wrapper<raw_t>::type; //if raw_t is polymorphic, stored_t is the same, otherwise, stored_t is wrapper of raw_t that makes it polymorphic
@@ -510,33 +617,62 @@ private:
 public:
 	virt_data<raw_t> data;
 
+	void reset()
+	{
+		data.reset();
+	}
 
 	template<typename result_t, typename...ts>
 	friend virt<result_t> make_virt(ts&&...vals)
 		requires std::constructible_from<result_t, ts...>;
 
+	template<special_derived_from<stored_t> result_t = raw_t, typename...ts>
+		requires std::constructible_from<result_t, ts...>
+	result_t& emplace(ts&&...args)
+	{
+		auto&& newdata = make_virt<result_t>(std::forward<ts>(args)...);
+		result_t& ret = *newdata;
+		data = std::move(newdata);
+		return ret;
+	}
+	template<special_derived_from<stored_t> result_t = raw_t, typename u, typename...ts>
+		requires std::constructible_from<result_t, ts...>
+	result_t& emplace(std::initializer_list<u> il, ts&&...args)
+	{
+		return emplace<result_t>(il,std::forward<ts>(args)...);
+	}
+
 	explicit virt() : data{} {} //data{} initializes to nullptr
 
-	template<special_derived_from<stored_t> from_t>
-	virt(virt_data<from_t>&& a) : data(std::move(a.ptr)) {}
 
 	template<special_derived_from<stored_t> from_t>
-	virt(virt_data<from_t> const& a) : data(a.ptr) {}
+	virt(virt_data<from_t>&& a) : data(std::move(a)) {}
+
+	template<special_derived_from<stored_t> from_t>
+	virt(virt_data<from_t> const& a) : data(a) {}
+
+	virt(virt_data<raw_t>&& a) : data(std::move(a)) {}
+
+	virt(virt_data<raw_t> const& a) : data(a) {}
+
 
 	template<special_derived_from<stored_t> rhs_t>
-		requires (!is_virt_v<std::decay_t<rhs_t>>)
+		requires (!is_virt_v<std::decay_t<rhs_t>> && std::constructible_from<stored_t,rhs_t&&>)
 	virt(rhs_t&& a) : data{ std::make_unique<derived_wrapper<typename underlying_type_wrapper<rhs_t>::type>>(std::move(a)) } {}
 
 	template<special_derived_from<stored_t> rhs_t>
-		requires (!is_virt_v<std::decay_t<rhs_t>>)
+		requires (!is_virt_v<std::decay_t<rhs_t>> && std::constructible_from<stored_t, rhs_t const&>)
 	virt(rhs_t const& a) : data{ std::make_unique<derived_wrapper<typename underlying_type_wrapper<rhs_t>::type>>(a) } {}
 
-	virt(raw_t&& a) : data{ std::make_unique<derived_wrapper<stored_t>>(std::move(a)) } 
+	virt(raw_t&& a) requires std::move_constructible<raw_t>
+	: data{ std::make_unique<derived_wrapper<stored_t>>(std::move(a)) } 
 	{static_assert(!std::is_same_v<raw_t, int> || !std::is_same_v<stored_t,int>);}
 
-	virt(raw_t const& a) : data{ std::make_unique<derived_wrapper<stored_t>>(a) } {}
+	virt(raw_t const& a) requires std::copy_constructible<raw_t>
+	: data{ std::make_unique<derived_wrapper<stored_t>>(a) } {}
 
-	template<special_derived_from<stored_t> rhs_t>
+	template<typename rhs_t>
+		requires special_derived_from<std::remove_const_t<rhs_t>, stored_t>
 	virt(virt<rhs_t>&& a)
 	{
 		if (a)
@@ -546,7 +682,7 @@ public:
 		}
 		else
 		{
-			data.ptr = nullptr;
+			reset();
 		}
 	}
 
@@ -559,12 +695,13 @@ public:
 		}
 		else
 		{
-			data.ptr = nullptr;
+			reset();
 		}
 	}
 
 
-	template<special_derived_from<stored_t> rhs_t>
+	template<typename rhs_t>
+		requires special_derived_from<std::remove_const_t<rhs_t>, stored_t>
 	virt(virt<rhs_t> const& a)
 	{
 		if (a)
@@ -574,7 +711,7 @@ public:
 		}
 		else
 		{
-			data.ptr = nullptr;
+			reset();
 		}
 	}
 
@@ -587,27 +724,30 @@ public:
 		}
 		else
 		{
-			data.ptr = nullptr;
+			reset();
 		}
 	}
 
 
 	template<special_derived_from<stored_t> from_t>
 	virt& operator=(virt_data<from_t>&& a)
+		requires (!std::is_const_v<raw_t>)
 	{
-		data.ptr = std::move(a.ptr);
+		data = std::move(a);
 		return *this;
 	}
 
 	template<special_derived_from<stored_t> from_t>
 	virt& operator=(virt_data<from_t> const& a)
+		requires (!std::is_const_v<raw_t>)
 	{
-		data.ptr = a.ptr;
+		data = a;
 		return *this;
 	}
 
 	template<special_derived_from<stored_t> rhs_t>
-		requires (!is_virt_v<std::decay_t<rhs_t>>)
+		requires (!is_virt_v<std::decay_t<rhs_t>> && std::assignable_from<stored_t, rhs_t&&>
+			&& !std::is_const_v<raw_t> )
 	virt& operator=(rhs_t&& a)
 	{
 		if(get_type() == typeof(a))
@@ -622,7 +762,8 @@ public:
 	}
 
 	template<special_derived_from<stored_t> rhs_t>
-		requires (!is_virt_v<std::decay_t<rhs_t>>)
+		requires (!is_virt_v<std::decay_t<rhs_t>> && std::assignable_from <stored_t, rhs_t const&>
+			&& !std::is_const_v<raw_t>)
 	virt& operator=(rhs_t const& a)
 	{
 		if (get_type() == typeof(a))
@@ -636,10 +777,12 @@ public:
 		return *this;
 	}
 
-	template<special_derived_from<stored_t> rhs_t>
+	template<typename rhs_t>
+		requires (special_derived_from<std::remove_const_t<rhs_t>, stored_t>
+			&& !std::is_const_v<raw_t>) 
 	virt& operator=(virt<rhs_t>&& a)
 	{
-		if(isempty() || a.isempty() || !data.ptr->try_move_assign(a.data.ptr.get()))
+		if(!has_value() || !a.has_value() || !data.ptr->try_move_assign(a.data.ptr.get()))
 		{
 			data.ptr = std::move(virt{ std::move(a) }.data.ptr);
 		}
@@ -647,18 +790,21 @@ public:
 	}
 
 	virt& operator=(virt&& a)
+		requires (!std::is_const_v<raw_t>)
 	{
-		if (isempty() || a.isempty() || !data.ptr->try_move_assign(a.data.ptr.get()))
+		if (!has_value() || !a.has_value() || !data.ptr->try_move_assign(a.data.ptr.get()))
 		{
 			data.ptr = std::move(virt{ std::move(a) }.data.ptr);
 		}
 		return *this;
 	}
 
-	template<special_derived_from<stored_t> rhs_t>
+	template<typename rhs_t>
+		requires (special_derived_from<std::remove_const_t<rhs_t>, stored_t>
+			&& !std::is_const_v<raw_t>)
 	virt& operator=(virt<rhs_t> const& a)
 	{
-		if (isempty() || a.isempty() || !data.ptr->try_copy_assign(a.data.ptr.get()))
+		if (!has_value() || !a.has_value() || !data.ptr->try_copy_assign(a.data.ptr.get()))
 		{
 			data.ptr = std::move(virt{ a }.data.ptr);
 		}
@@ -666,8 +812,9 @@ public:
 	}
 
 	virt& operator=(virt const& a)
+		requires (!std::is_const_v<raw_t>)
 	{
-		if (isempty() || a.isempty() || !data.ptr->try_copy_assign(a.data.ptr.get()))
+		if (!has_value() || !a.has_value() || !data.ptr->try_copy_assign(a.data.ptr.get()))
 		{
 			data.ptr = std::move(virt{ a }.data.ptr);
 		}
@@ -680,69 +827,58 @@ public:
 		return data.ptr->get_typeof();
 	}
 
-
-private:
-	raw_t* get_ptr() const
+	raw_t* get() const
 	{
 		if(!data.ptr)
 		{
 			return nullptr;
 		}
 		stored_t* ptr = smart_static_cast<stored_t*>(&*data.ptr);
-		if constexpr(std::is_polymorphic_v<raw_t>)
-		{
-			raw_t* ret = ptr;
-			return ret;
-		}
-		else
-		{
-			return &ptr->val;
-		}
-
+		raw_t& ret = *ptr;
+		return &ret;
 	}
-public:
 
 	operator raw_t const* () const
 	{
-		return get_ptr();
+		return get();
 	}
 
 	operator raw_t*()
 	{
-		return get_ptr();
+		return get();
 	}
 
 	raw_t const& operator*() const
 	{
-		my_assert([&] {return !isempty(); }, "cannot access empty virt");
-		return *get_ptr();
+		my_assert([&] {return has_value(); }, "cannot access empty virt");
+		return *get();
 	}
 
 	raw_t& operator*()
 	{
-		my_assert([&] {return !isempty(); }, "cannot access empty virt");
-		return *get_ptr();
+		my_assert([&] {return has_value(); }, "cannot access empty virt");
+		return *get();
 	}
 
 	raw_t const* operator->() const
 	{
-		my_assert([&] {return !isempty(); }, "cannot access empty virt");
-		return get_ptr();
+		my_assert([&] {return has_value(); }, "cannot access empty virt");
+		return get();
 	}
 	raw_t* operator->()
 	{
-		my_assert([&] {return !isempty(); }, "cannot access empty virt");
-		return get_ptr();
+		my_assert([&] {return has_value(); }, "cannot access empty virt");
+		return get();
 	}
-	
-	bool isempty() const
+
+	bool has_value() const
 	{
-		return get_ptr() == nullptr;
+		return get() != nullptr;
 	}
 
 	operator bool() const
 	{
-		return get_ptr() != nullptr;
+		return has_value();
 	}
 
 
@@ -752,8 +888,8 @@ public:
 	tar_t* upcast()
 	{
 		using r_tar_t = typename underlying_type_wrapper<tar_t>::type;
-		my_assert([&] {return !isempty();}, "cannot upcast a nullptr");
-		r_tar_t* ret = get_ptr();
+		my_assert([&] {return has_value();}, "cannot upcast a nullptr");
+		r_tar_t* ret = get();
 		return ret;
 	}
 
@@ -762,8 +898,8 @@ public:
 	bool can_downcast() //uses dynamic_cast
 	{
 		using r_tar_t = typename underlying_type_wrapper<tar_t>::type;
-		my_assert([&] {return !isempty();}, "cannot check can_downcast for a nullptr");
-		return dynamic_cast<r_tar_t*>(get_ptr()) != nullptr;
+		my_assert([&] {return has_value();}, "cannot check can_downcast for a nullptr");
+		return dynamic_cast<r_tar_t*>(get()) != nullptr;
 	}
 
 	//no rtti
@@ -780,7 +916,7 @@ public:
 	tar_t* downcast()
 	{
 		using r_tar_t = typename underlying_type_wrapper<tar_t>::type;
-		my_assert([&] {return !isempty(); }, "cannot downcast a nullptr");
+		my_assert([&] {return has_value(); }, "cannot downcast a nullptr");
 		my_assert([&] {return can_downcast<r_tar_t>();}, "downcast failed");
 		tar_t& ret = *smart_static_cast<r_tar_t*>(&*data.ptr);
 		return &ret;
@@ -812,6 +948,7 @@ public:
 
 };
 
+
 template<typename t>
 virt_data<t>& get_data_from_virt(virt<t>& a)
 {
@@ -836,9 +973,19 @@ virt<result_t> make_virt(ts&&...vals)
 	requires std::constructible_from<result_t, ts...>
 {
 	using t = typename underlying_type_wrapper<result_t>::type;
-	return { virt_data<t>{std::make_unique<derived_wrapper<t>>(std::forward<ts>(vals)...)} };
+	return virt_data<result_t>{std::make_unique<derived_wrapper<t>>(std::forward<ts>(vals)...)};
 }
 
 //allocate_virt
 
 //make/allocate _for_overwrite
+
+
+namespace std
+{
+	template<typename t>
+	void swap(virt<t>& lhs, virt<t>& rhs)
+	{
+		std::swap(lhs.data, rhs.data);
+	}
+}
