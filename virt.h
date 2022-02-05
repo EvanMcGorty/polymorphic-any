@@ -92,6 +92,11 @@ template<typename to_t, typename error_string_t = char const*>
 	requires (std::is_pointer_v<to_t> && !is_any_or_derived_wrapper_v<std::remove_pointer_t<to_t>>)
 to_t smart_static_cast(any*, error_string_t&& = "bad static cast from any*");
 
+
+//if t is a virt or a virt_data
+template<typename t>
+constexpr bool is_virt_v = false; //will be specialized later
+
 //a universal base class
 class any
 {
@@ -178,7 +183,7 @@ class derived_wrapper;
 //a wrapper of t that inherits from t and any to provide any with virtual methods to perform operations on t
 template<typename t>
 	requires std::is_const_v<t>
-class derived_wrapper<t> : public std::remove_const_t<t>, public any //declared final so that sizeof can be determined for the whole object
+class derived_wrapper<t> : public std::remove_const_t<t>, public any
 {
 public:
 
@@ -427,9 +432,6 @@ std::unique_ptr<to_t> sptr_static_cast(std::unique_ptr<from_t>&& a, error_string
 	return std::unique_ptr<to_t>(result);
 }
 
-//if t is a virt or a virt_data
-template<typename t>
-constexpr bool is_virt_v = false;
 
 //even though t doesnt actually derive from any, virt acts like it does for virt<any> and virt<t>, so this is necessary
 template<typename derived_t, typename base_t>
@@ -672,7 +674,7 @@ public:
 	: data{ std::make_unique<derived_wrapper<stored_t>>(a) } {}
 
 	template<typename rhs_t>
-		requires special_derived_from<std::remove_const_t<rhs_t>, stored_t>
+		requires (special_derived_from<std::remove_const_t<rhs_t>, stored_t> && !std::is_const_v<rhs_t>)
 	virt(virt<rhs_t>&& a)
 	{
 		if (a)
@@ -687,6 +689,7 @@ public:
 	}
 
 	virt(virt&& a)
+		requires (!std::is_const_v<raw_t>)
 	{
 		if (a)
 		{
@@ -731,7 +734,6 @@ public:
 
 	template<special_derived_from<stored_t> from_t>
 	virt& operator=(virt_data<from_t>&& a)
-		requires (!std::is_const_v<raw_t>)
 	{
 		data = std::move(a);
 		return *this;
@@ -739,7 +741,6 @@ public:
 
 	template<special_derived_from<stored_t> from_t>
 	virt& operator=(virt_data<from_t> const& a)
-		requires (!std::is_const_v<raw_t>)
 	{
 		data = a;
 		return *this;
@@ -779,7 +780,7 @@ public:
 
 	template<typename rhs_t>
 		requires (special_derived_from<std::remove_const_t<rhs_t>, stored_t>
-			&& !std::is_const_v<raw_t>) 
+			&& !std::is_const_v<raw_t> && !std::is_const_v<rhs_t>)
 	virt& operator=(virt<rhs_t>&& a)
 	{
 		if(!has_value() || !a.has_value() || !data.ptr->try_move_assign(a.data.ptr.get()))
