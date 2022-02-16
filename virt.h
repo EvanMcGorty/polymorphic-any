@@ -6,35 +6,6 @@
 
 #include"type_ids.h"
 
-//todo: allow further template parameters of unique_ptr or different pointer types
-//equality comparison? std::function
-//make everything constexpr
-//custom stack based alloc function for unique_ptr, have a byte[] buffer in virt that unique_ptr points to when the target object is small enough
-//virt second template argument that takes a size_t wrapper or a byte[] wrapper that automatically calculates the largest size from a list of types
-//but be sure to be able to distinguish between a pure variant and one that is also an virt
-//second template parameter that includes pointer type should be the same thing that can transform this into a variant
-// 
-//need to cover:
-//virt unconstrained, virt constrained to base class
-//		a generic constraint (compile time) can also be given on the classes that may be used with virt
-//virt with unique_ptr, virt with shared_ptr, etc
-//virt with a minimum list of types that it may contain, virt without this list (same as the list being empty)
-//virt with stack based memory buffer of at least N, virt without buffer (same as the buffer being N=0)
-//if virt has a buffer:
-//		buffer can be set to be at least big enough to acommodate the list of the types which it may contain
-//		or not
-//if virt has a type list
-//		virt can disallow objects whose types are not in this list (in this case the manually set buffer is meaningless)
-//		or can disallow objects whose types are not on this list unless they fit in the buffer
-//		or can simply allow all objects to at least be allocated on the free store if needed
-//can choose which operations are expected of its objects (copy construction
-//can choose the protocol when an object cant perform an operation i.e.
-//		throw exception or assert error or default to evaluate to nullptr/uninitialized
-//		or simply disallow types that dont have certain operations
-
-// 
-//note: a variadic list wrapper and a concept for that would be nice for users to be able to use
-//maybe one day the memory buffer could be used to store more than one object (maybe of different sizes)
 
 //my assert for logic errors when error checking is on
 template<std::predicate t, typename error_string_t = char const*>
@@ -97,6 +68,7 @@ to_t smart_static_cast(any*, error_string_t&& = "bad static cast from any*");
 template<typename t>
 constexpr bool is_virt_v = false; //will be specialized later
 
+
 //a universal base class
 class any
 {
@@ -123,14 +95,13 @@ friend to_t smart_static_cast(any*, error_string_t&&);
 
 	//virtual bool is_reference() = 0;
 
-	//generic operations without consistent return types
 	virtual std::unique_ptr<any> copy_construct() = 0;
 	virtual std::unique_ptr<any> move_construct() = 0;
 
 
 	//virtual void placement_copy_construct(safe_void_ptr_base*) = 0;
 	//virtual void placement_move_construct(safe_void_ptr_base*) = 0;
-	//non constexpr
+	//non constexpr? std::construct_at?
 
 
 	virtual bool try_copy_assign(any*) = 0;
@@ -139,42 +110,9 @@ friend to_t smart_static_cast(any*, error_string_t&&);
 	virtual bool do_copy_assign(safe_void_ptr_base*) = 0;
 	virtual bool do_move_assign(safe_void_ptr_base*) = 0;
 
-	//make reference/pointer
-	//make const reference/pointer
-	//dereference
-	//const cast?
-	//make optional?
-	//make std::unique_ptr?
-	//make arbitrary templated class/call arbitrary templated function given by template parameter in virt
-	//		maybe make almost_any<t> derive from any in cases when this template parameter is supplied
-	//call arbitrary template<t> function by passing in an id so derived wrapper knows which templated function to call
-	//		derived_wrapper will have a list of callables in its template arguments
-	//		maybe the id could be a unique type_id* like object of a wrapper of the callable template
-	//		(because raw templates can also be given ids by passing a template template to a wrapper class)
-	//		maybe put everything, including copy costruct and move construct into this system
-	//		this could be part of the base class constraint ie virt<typewhichcan<tostring,index>
-	
-	//make std::any
-	//default constructor generator
-	//operations with only 1 generic argument (this*)
-	//ostream << operator
-	//istream >> operator
-	//[size_t] index operator
-	//conversion to some_iterator<ptr<any>> (by iterating through underlying type if possible)
-	//operator bool()
-	//conversions to common types (int, double, string)
-	//operations with multiple generic arguments
-	//same-type comparison operators
-
-
-	//virtual size_t sizeof_most_derived() const = 0;
-	//typeid of most derived object
-	//return std::function<ptr<any>(ptr<any>)>(target)
-
-	//maybe not needed:
-	//virtual any* any_this() const = 0;
-	//virtual void* derived_wrapper_this() const = 0;
-
+	//get void*
+	//get std::byte* (pod only?)
+	//take advantage of other pod-like properties, such as trivialy constructible types
 };
 
 template<typename t>
@@ -448,7 +386,6 @@ concept special_derived_from = (
 
 
 
-
 //if t is not polymorphic, static_cast cannot be used to convert it to any*, so this provides a wrapper type
 template<typename t>
 struct underlying_type_wrapper
@@ -571,11 +508,6 @@ public:
 	{
 		give_unique_ptr(std::move(a));
 		return *this;
-	}
-
-	std::unique_ptr<stored_t> get_unique_ptr() &&
-	{
-		return sptr_static_cast<stored_t>(std::move(ptr));
 	}
 
 	template<special_derived_from<stored_t> tar_t>
